@@ -1,0 +1,668 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, collection, doc, setDoc, getDoc, updateDoc, 
+  onSnapshot, query, addDoc, serverTimestamp 
+} from 'firebase/firestore';
+import { 
+  getAuth, signInAnonymously, onAuthStateChanged, signOut 
+} from 'firebase/auth';
+import { 
+  Layout, Wallet, History, BookOpen, Settings, LogOut, 
+  Moon, Sun, User, ChevronRight, CheckCircle, Clock, 
+  AlertCircle, Edit2, Plus, Minus, Search, Filter,
+  TrendingUp, TrendingDown, DollarSign, Menu, X, ShieldCheck
+} from 'lucide-react';
+
+/**
+ * --- จุดที่คุณต้องแก้ไข (Firebase Config) ---
+ * นำค่าที่ได้จากหน้า Firebase Console มาวางแทนที่ด้านล่างนี้ครับ
+ */
+
+const firebaseConfig = {
+  apiKey: "AIzaSyAOXm4aDbToq4ZahlsbgwFz8nfkIviL-bs",
+  authDomain: "itdi-fund.firebaseapp.com",
+  projectId: "itdi-fund",
+  storageBucket: "itdi-fund.firebasestorage.app",
+  messagingSenderId: "770219582415",
+  appId: "1:770219582415:web:e6c780dd599bb4f7d528ba",
+  measurementId: "G-H7YPMTK2VD"
+};
+
+// ตรวจสอบระบบจำลองของ Canvas หรือใช้ค่าจริงที่คุณกรอก
+const finalConfig = typeof __firebase_config !== 'undefined' 
+  ? JSON.parse(__firebase_config) 
+  : firebaseConfig;
+
+const app = initializeApp(finalConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'itdi-fund-production';
+
+// --- รายชื่อ Admin เริ่มต้น ---
+const INITIAL_ADMINS = ['684295024@parichat.skru.ac.th', 'admin'];
+
+// --- UI Components ---
+
+const Card = ({ children, className = "" }) => (
+  <div className={`bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden ${className}`}>
+    {children}
+  </div>
+);
+
+const Badge = ({ children, variant = "neutral" }) => {
+  const styles = {
+    success: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+    warning: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+    error: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
+    neutral: "bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300",
+    admin: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400"
+  };
+  return <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${styles[variant]}`}>{children}</span>;
+};
+
+// --- Main Application ---
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [userData, setUserData] = useState(null);
+  const [isDarkMode, setIsDarkMode] = useState(true);
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [loading, setLoading] = useState(true);
+  const [isSidebarOpen, setSidebarOpen] = useState(false);
+
+  // Firestore Data State
+  const [config, setConfig] = useState({ currentWeek: 1 });
+  const [allStudents, setAllStudents] = useState([]);
+  const [transactions, setTransactions] = useState([]);
+  const [ledger, setLedger] = useState([]);
+
+  // Auth & Init
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        await signInAnonymously(auth);
+      } catch (err) {
+        console.error("Auth error:", err);
+      }
+    };
+    initAuth();
+
+    const unsubAuth = onAuthStateChanged(auth, async (currentUser) => {
+      if (currentUser) {
+        setUser(currentUser);
+      } else {
+        setUser(null);
+        setUserData(null);
+      }
+      setLoading(false);
+    });
+
+    return () => unsubAuth();
+  }, []);
+
+  // Sync Data
+  useEffect(() => {
+    if (!user) return;
+
+    const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'config');
+    const unsubConfig = onSnapshot(configRef, (docSnap) => {
+      if (docSnap.exists()) setConfig(docSnap.data());
+      else setDoc(configRef, { currentWeek: 1 });
+    });
+
+    const studentsRef = collection(db, 'artifacts', appId, 'public', 'data', 'students');
+    const unsubStudents = onSnapshot(studentsRef, (snap) => {
+      const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setAllStudents(data);
+      const currentStudent = data.find(s => s.uid === user.uid);
+      if (currentStudent) setUserData(currentStudent);
+    });
+
+    const transRef = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
+    const unsubTrans = onSnapshot(transRef, (snap) => {
+      setTransactions(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+
+    const ledgerRef = collection(db, 'artifacts', appId, 'public', 'data', 'ledger');
+    const unsubLedger = onSnapshot(ledgerRef, (snap) => {
+      setLedger(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+
+    return () => {
+      unsubConfig(); unsubStudents(); unsubTrans(); unsubLedger();
+    };
+  }, [user]);
+
+  // Handle Login
+  const handleLogin = async (studentId) => {
+    setLoading(true);
+    const studentRef = doc(db, 'artifacts', appId, 'public', 'data', 'students', studentId);
+    const snap = await getDoc(studentRef);
+    
+    const isNewAdmin = INITIAL_ADMINS.includes(studentId);
+
+    if (snap.exists()) {
+      const existingData = snap.data();
+      const updatedRole = isNewAdmin ? 'admin' : existingData.role || 'user';
+      await updateDoc(studentRef, { 
+        uid: user.uid,
+        role: updatedRole 
+      });
+      setUserData({ id: studentId, ...existingData, role: updatedRole });
+    } else {
+      const newData = {
+        studentId,
+        uid: user.uid,
+        name: `นักศึกษา ${studentId}`,
+        totalPaid: 0,
+        role: isNewAdmin ? 'admin' : 'user',
+        createdAt: serverTimestamp()
+      };
+      await setDoc(studentRef, newData);
+      setUserData(newData);
+    }
+    setLoading(false);
+  };
+
+  if (loading) return (
+    <div className={`min-h-screen flex items-center justify-center ${isDarkMode ? 'dark bg-slate-900 text-white' : 'bg-slate-50'}`}>
+      <div className="animate-pulse flex flex-col items-center">
+        <div className="w-16 h-16 bg-blue-500 rounded-full mb-4 shadow-lg shadow-blue-500/50"></div>
+        <p className="text-slate-500 font-medium">กำลังโหลดระบบ...</p>
+      </div>
+    </div>
+  );
+
+  if (!userData) return <LoginScreen onLogin={handleLogin} isDarkMode={isDarkMode} />;
+
+  const isAdmin = userData.role === 'admin';
+
+  return (
+    <div className={isDarkMode ? 'dark' : ''}>
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex">
+        
+        {/* Sidebar */}
+        <aside className={`fixed inset-y-0 left-0 z-50 w-64 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 transition-transform lg:translate-x-0 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+          <div className="p-6 h-full flex flex-col">
+            <div className="flex items-center gap-3 mb-10">
+              <div className="p-2 bg-blue-600 rounded-lg shadow-md">
+                <Wallet className="text-white w-6 h-6" />
+              </div>
+              <h1 className="font-bold text-xl tracking-tight">ITDI Fund</h1>
+              <button onClick={() => setSidebarOpen(false)} className="lg:hidden ml-auto p-1 hover:bg-slate-100 dark:hover:bg-slate-800 rounded">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <nav className="space-y-1 flex-1">
+              <NavItem active={activeTab === 'dashboard'} onClick={() => {setActiveTab('dashboard'); setSidebarOpen(false)}} icon={<Layout />} label="แดชบอร์ด" />
+              <NavItem active={activeTab === 'history'} onClick={() => {setActiveTab('history'); setSidebarOpen(false)}} icon={<History />} label="ประวัติของฉัน" />
+              <NavItem active={activeTab === 'ledger'} onClick={() => {setActiveTab('ledger'); setSidebarOpen(false)}} icon={<BookOpen />} label="สมุดบัญชีกลาง" />
+              {isAdmin && (
+                <NavItem active={activeTab === 'admin'} onClick={() => {setActiveTab('admin'); setSidebarOpen(false)}} icon={<Settings />} label="จัดการระบบ" />
+              )}
+            </nav>
+
+            <div className="mt-auto pt-6 border-t border-slate-200 dark:border-slate-800 space-y-4">
+              <div className="flex items-center gap-3 px-3">
+                <div className="w-10 h-10 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center border border-slate-200 dark:border-slate-700">
+                  {isAdmin ? <ShieldCheck className="w-6 h-6 text-purple-500" /> : <User className="w-6 h-6 text-slate-500" />}
+                </div>
+                <div className="overflow-hidden">
+                  <p className="text-sm font-semibold truncate max-w-[120px]">{userData.studentId}</p>
+                  <p className="text-xs text-slate-500 capitalize">{userData.role}</p>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button 
+                  onClick={() => setIsDarkMode(!isDarkMode)}
+                  className="p-2 flex-1 flex justify-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors border border-slate-200 dark:border-slate-800"
+                >
+                  {isDarkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+                </button>
+                <button 
+                  onClick={() => signOut(auth)}
+                  className="p-2 flex-1 flex justify-center rounded-lg hover:bg-rose-50 dark:hover:bg-rose-900/20 text-rose-500 transition-colors border border-slate-200 dark:border-slate-800"
+                >
+                  <LogOut className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        {isSidebarOpen && <div className="fixed inset-0 bg-black/50 z-40 lg:hidden backdrop-blur-sm" onClick={() => setSidebarOpen(false)}></div>}
+
+        <main className="flex-1 lg:ml-64 p-4 lg:p-8">
+          <header className="flex items-center justify-between mb-8 lg:hidden">
+            <button onClick={() => setSidebarOpen(true)} className="p-2 rounded-lg bg-white dark:bg-slate-900 shadow-sm border border-slate-200 dark:border-slate-800">
+              <Menu className="w-6 h-6" />
+            </button>
+            <div className="flex items-center gap-2">
+              <div className="p-1.5 bg-blue-600 rounded-md">
+                <Wallet className="text-white w-4 h-4" />
+              </div>
+              <span className="font-bold">ITDI Fund</span>
+            </div>
+            <div className="w-10"></div>
+          </header>
+
+          <div className="max-w-6xl mx-auto">
+            {activeTab === 'dashboard' && <Dashboard config={config} user={userData} transactions={transactions} ledger={ledger} />}
+            {activeTab === 'history' && <UserHistory user={userData} transactions={transactions} />}
+            {activeTab === 'ledger' && <LedgerView ledger={ledger} />}
+            {activeTab === 'admin' && isAdmin && (
+              <AdminPanel 
+                config={config} 
+                students={allStudents} 
+                transactions={transactions}
+                ledger={ledger}
+              />
+            )}
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+}
+
+// --- Components ---
+
+function NavItem({ icon, label, active, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
+        active 
+        ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' 
+        : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+      }`}
+    >
+      {React.cloneElement(icon, { size: 20 })}
+      {label}
+    </button>
+  );
+}
+
+function LoginScreen({ onLogin, isDarkMode }) {
+  const [sid, setSid] = useState('');
+  
+  return (
+    <div className={`min-h-screen flex flex-col items-center justify-center p-6 transition-colors ${isDarkMode ? 'dark bg-slate-950 text-white' : 'bg-slate-50'}`}>
+      <Card className="w-full max-w-md p-8 text-center border-none shadow-2xl shadow-blue-500/10">
+        <div className="inline-flex p-4 bg-blue-600 rounded-2xl mb-6 shadow-xl shadow-blue-600/30">
+          <Wallet className="text-white w-10 h-10" />
+        </div>
+        <h2 className="text-2xl font-bold mb-2">ระบบกองทุน ITDI</h2>
+        <p className="text-slate-500 dark:text-slate-400 mb-8">กรุณากรอกรหัสนักศึกษาหรืออีเมล parichat</p>
+        
+        <form onSubmit={(e) => { e.preventDefault(); if(sid) onLogin(sid); }}>
+          <div className="text-left mb-6">
+            <label className="block text-sm font-medium mb-2 text-slate-600 dark:text-slate-300">รหัสนักศึกษา / อีเมล</label>
+            <input 
+              type="text" 
+              placeholder="รหัสนักศึกษา หรือ อีเมล @parichat..."
+              value={sid}
+              onChange={(e) => setSid(e.target.value)}
+              className="w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 focus:ring-2 focus:ring-blue-500 outline-none transition-all placeholder:text-slate-400"
+              required
+            />
+          </div>
+          <button className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-xl shadow-lg shadow-blue-600/30 transition-all flex items-center justify-center gap-2">
+            เข้าสู่ระบบ <ChevronRight className="w-5 h-5" />
+          </button>
+        </form>
+      </Card>
+      <p className="mt-8 text-slate-400 text-xs text-center leading-relaxed">
+        ระบบบันทึกข้อมูลการจ่ายเงิน Real-time <br/> สำหรับนักศึกษา ITDI SKRU
+      </p>
+    </div>
+  );
+}
+
+function Dashboard({ config, user, transactions, ledger }) {
+  const userTotal = transactions
+    .filter(t => t.studentId === user.studentId && t.status === 'Approved')
+    .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+
+  const totalBalance = ledger.reduce((sum, item) => sum + (Number(item.Income) || 0) - (Number(item.Expense) || 0), 0);
+
+  return (
+    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight">ภาพรวมกองทุน</h2>
+          <p className="text-slate-500 text-sm">ยินดีต้อนรับกลับ, {user.studentId}</p>
+        </div>
+        <div className="bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2">
+          <Clock className="w-4 h-4" /> อาทิตย์ที่ {config.currentWeek}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <Card className="p-6 border-l-4 border-blue-500">
+          <p className="text-slate-500 dark:text-slate-400 text-sm font-medium mb-1">ยอดเงินสะสมของคุณ</p>
+          <div className="flex items-baseline gap-2">
+            <span className="text-3xl font-bold">{userTotal.toLocaleString()}</span>
+            <span className="text-slate-500 text-sm">บาท</span>
+          </div>
+        </Card>
+
+        <Card className="p-6 border-l-4 border-emerald-500">
+          <p className="text-slate-500 dark:text-slate-400 text-sm font-medium mb-1">ยอดเงินกองกลางคงเหลือ</p>
+          <div className="flex items-baseline gap-2">
+            <span className="text-3xl font-bold text-emerald-600 dark:text-emerald-400">{totalBalance.toLocaleString()}</span>
+            <span className="text-slate-500 text-sm">บาท</span>
+          </div>
+        </Card>
+
+        <Card className="p-6 border-l-4 border-amber-500">
+          <p className="text-slate-500 dark:text-slate-400 text-sm font-medium mb-1">สถานะสัปดาห์ที่ {config.currentWeek}</p>
+          <div className="mt-1">
+            {transactions.some(t => t.studentId === user.studentId && Number(t.week) === config.currentWeek && t.status === 'Approved') ? (
+              <Badge variant="success">จ่ายแล้ว</Badge>
+            ) : transactions.some(t => t.studentId === user.studentId && Number(t.week) === config.currentWeek && t.status === 'Pending') ? (
+              <Badge variant="warning">รอตรวจสอบ</Badge>
+            ) : (
+              <Badge variant="error">ยังไม่ได้จ่าย</Badge>
+            )}
+          </div>
+        </Card>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card className="flex flex-col">
+          <div className="p-6 border-b border-slate-200 dark:border-slate-800 flex justify-between items-center">
+            <h3 className="font-bold">รายการล่าสุด</h3>
+            <button className="text-blue-500 text-sm font-medium hover:underline">ดูทั้งหมด</button>
+          </div>
+          <div className="p-0 overflow-x-auto">
+            <table className="w-full text-left">
+              <thead className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 text-xs uppercase tracking-wider">
+                <tr>
+                  <th className="px-6 py-3 font-semibold">รหัส</th>
+                  <th className="px-6 py-3 font-semibold">สัปดาห์</th>
+                  <th className="px-6 py-3 font-semibold">จำนวน</th>
+                  <th className="px-6 py-3 font-semibold text-right">สถานะ</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {transactions.slice(0, 5).map((t, idx) => (
+                  <tr key={idx} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                    <td className="px-6 py-4 text-sm font-medium">{t.studentId}</td>
+                    <td className="px-6 py-4 text-sm text-slate-500">{t.week}</td>
+                    <td className="px-6 py-4 text-sm font-bold">{t.amount} ฿</td>
+                    <td className="px-6 py-4 text-right">
+                      <Badge variant={t.status === 'Approved' ? 'success' : 'warning'}>{t.status}</Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+
+        <Card className="p-6">
+          <h3 className="font-bold mb-6">ความคืบหน้าการเก็บเงิน</h3>
+          <div className="space-y-4">
+            <div className="flex justify-between text-sm mb-1">
+              <span className="text-slate-500">ความครอบคลุม (สัปดาห์ปัจจุบัน)</span>
+              <span className="font-bold">72%</span>
+            </div>
+            <div className="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-3">
+              <div className="bg-blue-600 h-3 rounded-full shadow-sm" style={{ width: '72%' }}></div>
+            </div>
+            <div className="grid grid-cols-2 gap-4 mt-8 pt-6 border-t border-slate-100 dark:border-slate-800">
+              <div className="text-center p-4 rounded-2xl bg-slate-50 dark:bg-slate-900">
+                <p className="text-xs text-slate-500 mb-1">จ่ายครบแล้ว</p>
+                <p className="text-lg font-bold">24 คน</p>
+              </div>
+              <div className="text-center p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800">
+                <p className="text-xs text-slate-500 mb-1">มียอดค้าง</p>
+                <p className="text-lg font-bold text-rose-500">8 คน</p>
+              </div>
+            </div>
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function UserHistory({ user, transactions }) {
+  const userTrans = useMemo(() => 
+    transactions.filter(t => t.studentId === user.studentId)
+    .sort((a, b) => (Number(b.week) || 0) - (Number(a.week) || 0))
+  , [transactions, user.studentId]);
+
+  return (
+    <div className="space-y-6 animate-in fade-in duration-500">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-bold">ประวัติการจ่ายเงิน</h2>
+        <button className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2 shadow-lg shadow-blue-500/20 transition-all active:scale-95">
+          <Plus size={18} /> แจ้งโอนเงิน
+        </button>
+      </div>
+
+      <Card>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead className="bg-slate-50 dark:bg-slate-900 text-slate-500 text-xs uppercase">
+              <tr>
+                <th className="px-6 py-4">วัน/เวลา</th>
+                <th className="px-6 py-4">สัปดาห์</th>
+                <th className="px-6 py-4">จำนวน</th>
+                <th className="px-6 py-4">หมายเหตุ</th>
+                <th className="px-6 py-4 text-right">สถานะ</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+              {userTrans.length > 0 ? userTrans.map((t, idx) => (
+                <tr key={idx} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                  <td className="px-6 py-4 text-sm">{t.ประทับเวลา || 'N/A'}</td>
+                  <td className="px-6 py-4 text-sm font-bold">อาทิตย์ที่ {t.week}</td>
+                  <td className="px-6 py-4 text-sm">{t.amount} ฿</td>
+                  <td className="px-6 py-4 text-sm text-slate-500 italic">{t.Note || '-'}</td>
+                  <td className="px-6 py-4 text-right">
+                    <Badge variant={t.status === 'Approved' ? 'success' : 'warning'}>{t.status}</Badge>
+                  </td>
+                </tr>
+              )) : (
+                <tr>
+                  <td colSpan="5" className="px-6 py-12 text-center text-slate-500 italic">ไม่มีประวัติการทำรายการ</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function LedgerView({ ledger }) {
+  const [searchTerm, setSearchTerm] = useState('');
+
+  const filteredLedger = useMemo(() => 
+    ledger.filter(item => 
+      item.Item?.toLowerCase().includes(searchTerm.toLowerCase())
+    ).sort((a, b) => new Date(b.Date) - new Date(a.Date))
+  , [ledger, searchTerm]);
+
+  return (
+    <div className="space-y-6 animate-in fade-in duration-500">
+      <div className="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center">
+        <h2 className="text-2xl font-bold">สมุดบัญชีกลาง</h2>
+        <div className="relative w-full md:w-64">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
+          <input 
+            type="text" 
+            placeholder="ค้นหารายการ..." 
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="w-full pl-10 pr-4 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+          />
+        </div>
+      </div>
+
+      <Card>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead className="bg-slate-50 dark:bg-slate-900 text-slate-500 text-xs uppercase">
+              <tr>
+                <th className="px-6 py-4">วันที่</th>
+                <th className="px-6 py-4">รายการ</th>
+                <th className="px-6 py-4 text-emerald-600 dark:text-emerald-400">รายรับ</th>
+                <th className="px-6 py-4 text-rose-600 dark:text-rose-400">รายจ่าย</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+              {filteredLedger.map((item, idx) => (
+                <tr key={idx} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                  <td className="px-6 py-4 text-sm">{item.Date}</td>
+                  <td className="px-6 py-4 text-sm font-medium">{item.Item}</td>
+                  <td className="px-6 py-4 text-sm font-bold text-emerald-600 dark:text-emerald-400">
+                    {item.Income && item.Income !== '0' ? `+${Number(item.Income).toLocaleString()}` : '-'}
+                  </td>
+                  <td className="px-6 py-4 text-sm font-bold text-rose-600 dark:text-rose-400">
+                    {item.Expense && item.Expense !== '0' ? `-${Number(item.Expense).toLocaleString()}` : '-'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function AdminPanel({ config, students, transactions, ledger }) {
+  const updateWeek = async (val) => {
+    const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'config');
+    await updateDoc(configRef, { currentWeek: Math.max(1, config.currentWeek + val) });
+  };
+
+  const approveTransaction = async (id) => {
+    const transRef = doc(db, 'artifacts', appId, 'public', 'data', 'transactions', id);
+    await updateDoc(transRef, { status: 'Approved' });
+  };
+
+  const toggleRole = async (studentId, currentRole) => {
+    const studentRef = doc(db, 'artifacts', appId, 'public', 'data', 'students', studentId);
+    const newRole = currentRole === 'admin' ? 'user' : 'admin';
+    await updateDoc(studentRef, { role: newRole });
+  };
+
+  return (
+    <div className="space-y-8 animate-in fade-in duration-500 pb-12">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-bold">จัดการระบบ (Admin)</h2>
+      </div>
+
+      <Card className="p-6 bg-blue-600 text-white border-none shadow-xl shadow-blue-500/20">
+        <div className="flex flex-col md:flex-row justify-between items-center gap-6">
+          <div className="flex items-center gap-4">
+            <div className="p-3 bg-white/20 rounded-2xl backdrop-blur-md">
+              <Settings className="w-8 h-8" />
+            </div>
+            <div>
+              <p className="text-blue-100 text-sm">สัปดาห์ปัจจุบันที่เก็บเงิน</p>
+              <h3 className="text-4xl font-black tracking-tighter">อาทิตย์ที่ {config.currentWeek}</h3>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 bg-white/10 p-2 rounded-2xl backdrop-blur-md border border-white/10">
+            <button onClick={() => updateWeek(-1)} className="p-3 hover:bg-white/20 rounded-xl transition-all active:scale-90">
+              <Minus className="w-6 h-6" />
+            </button>
+            <div className="w-px h-8 bg-white/20 mx-1"></div>
+            <button onClick={() => updateWeek(1)} className="p-3 hover:bg-white/20 rounded-xl transition-all active:scale-90">
+              <Plus className="w-6 h-6" />
+            </button>
+          </div>
+        </div>
+      </Card>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        <section>
+          <div className="flex items-center justify-between mb-4 px-2">
+            <div className="flex items-center gap-2">
+              <Clock className="text-amber-500 w-5 h-5" />
+              <h3 className="font-bold text-sm tracking-wide text-slate-500 dark:text-slate-400">รอการตรวจสอบ</h3>
+            </div>
+            <Badge variant="warning">{transactions.filter(t => t.status === 'Pending').length}</Badge>
+          </div>
+          <div className="space-y-3">
+            {transactions.filter(t => t.status === 'Pending').length > 0 ? (
+              transactions.filter(t => t.status === 'Pending').map((t, idx) => (
+                <Card key={idx} className="p-4 flex justify-between items-center hover:shadow-md transition-shadow">
+                  <div className="flex items-center gap-4">
+                    <div className="w-10 h-10 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center font-bold text-[10px] text-slate-500">
+                      {t.studentId.slice(-3)}
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold">{t.studentId}</p>
+                      <p className="text-xs text-slate-500">วีค {t.week} • <span className="text-emerald-600 dark:text-emerald-400 font-bold">{t.amount} ฿</span></p>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button 
+                      onClick={() => approveTransaction(t.id)}
+                      className="p-2.5 bg-emerald-100 text-emerald-600 rounded-xl hover:bg-emerald-600 hover:text-white transition-all shadow-sm"
+                    >
+                      <CheckCircle size={18} />
+                    </button>
+                  </div>
+                </Card>
+              ))
+            ) : (
+              <div className="p-10 text-center text-slate-400 bg-slate-100/50 dark:bg-slate-900/50 rounded-2xl border-2 border-dashed border-slate-200 dark:border-slate-800 italic text-sm">
+                ไม่มีรายการค้างตรวจสอบ
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section>
+          <div className="flex items-center gap-2 mb-4 px-2">
+            <User className="text-blue-500 w-5 h-5" />
+            <h3 className="font-bold text-sm tracking-wide text-slate-500 dark:text-slate-400">รายชื่อนักศึกษาและบทบาท</h3>
+          </div>
+          <Card className="max-h-[500px] overflow-y-auto">
+            <table className="w-full text-left border-collapse">
+              <thead className="sticky top-0 bg-white dark:bg-slate-800 z-10 border-b border-slate-100 dark:border-slate-700">
+                <tr>
+                  <th className="px-4 py-3 text-[10px] font-black uppercase text-slate-400">รหัส / อีเมล</th>
+                  <th className="px-4 py-3 text-[10px] font-black uppercase text-slate-400 text-right">สิทธิ์การใช้งาน</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50 dark:divide-slate-800">
+                {students.sort((a,b) => a.studentId.localeCompare(b.studentId)).map((s, idx) => (
+                  <tr key={idx} className="hover:bg-slate-50 dark:hover:bg-slate-800/30">
+                    <td className="px-4 py-3">
+                      <p className="text-sm font-medium">{s.studentId}</p>
+                      <p className="text-[10px] text-slate-400">จ่ายแล้ว {s.totalPaid || 0} ฿</p>
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <button 
+                        onClick={() => toggleRole(s.id, s.role)}
+                        className={`px-3 py-1 rounded-lg text-[10px] font-bold transition-all ${
+                          s.role === 'admin' 
+                          ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400 border border-purple-200 dark:border-purple-800' 
+                          : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400 border border-transparent'
+                        }`}
+                      >
+                        {s.role === 'admin' ? 'ADMIN' : 'USER'}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Card>
+        </section>
+      </div>
+    </div>
+  );
+}
